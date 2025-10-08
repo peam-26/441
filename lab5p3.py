@@ -23,7 +23,7 @@ t0 = time.time()
 try:
 	while True:
 		t = time.time() - t0 #current time elapsed
-		for i in range(12):
+		for i in range(10):
 			pwm = pwms[i]
 			B = math.sin(2*math.pi*f*t - (i*phi))**2 #whole B function, including the pi/11 phase subtracted from each level
 			pwm.ChangeDutyCycle(B*100)
