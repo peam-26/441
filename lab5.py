@@ -27,7 +27,7 @@ def reverse(channel):
     global direction
     direction *= -1
 
-GPIO.add_event_detect(21, GPIO.RISING, callback=reverse, bouncetime=300)
+GPIO.add_event_detect(21, GPIO.BOTH, callback=reverse, bouncetime=300)
 
 try:
 	while True:
