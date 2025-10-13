@@ -17,14 +17,11 @@ class Shifter:
 		time.sleep(0)
 		GPIO.output(p,0)
 
-	def shiftByte(self, b): # send a byte of data to the output
-    	for i in range(8):
-       		GPIO.output(self.dataPin, b & (1 << i))
-        	self.ping(self.clockPin)  # add bit to register
-    	self.ping(self.latchPin)  # send register to output
-
-
-
+    def shiftByte(self, b): # send a byte of data to the output
+        for i in range(8):
+       	    GPIO.output(self.dataPin, b & (1 << i))
+            self.ping(self.clockPin)  # add bit to register
+        self.ping(self.latchPin)  # send register to output
 
 try:
 	test = Shifter(23,24,25)
