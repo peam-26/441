@@ -18,7 +18,7 @@ try:
         nxtpos = pos + step
 
         # Bounce if you hit the edges (keep inside 0–7)
-        if nxtpos < 0 or nxtpos >= LED_COUNT:
+        if nxtpos < 0 or nxtpos >= 8:
             step = -step
             nxtpos = pos + step
 
