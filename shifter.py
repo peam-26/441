@@ -26,9 +26,9 @@ class Shifter:
 
 try:
     test = Shifter(23, 24, 25)
-    while True:
+    while 1:
         for i in range(2**8):
             test.shiftByte(i)
             time.sleep(0.5)
-except KeyboardInterrupt:
+except:
     GPIO.cleanup()
