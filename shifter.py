@@ -23,7 +23,7 @@ class Shifter:
             self.ping(self.clockPin)  # add bit to register
         self.ping(self.latchPin)  # send register to output
 
-
+""" COMMENTING OUT TO STOP INTEREFENCE WITH bug.py
 try:
     test = Shifter(23, 24, 25)
     while 1:
@@ -32,3 +32,5 @@ try:
             time.sleep(0.5)
 except:
     GPIO.cleanup()
+
+"""
