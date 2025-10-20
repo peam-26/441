@@ -3,7 +3,6 @@ from shifter import Shifter
 import RPi.GPIO as GPIO
 import time
 import random
-import threading  
 GPIO.setmode(GPIO.BCM)
 
 
@@ -28,7 +27,6 @@ class Bug:
             return
 
         self.__shifter.shiftByte(1 << self.x) # show current position
-
         step = 1 if random.getrandbits(1) else -1
         nxt  = self.x + step
 
@@ -45,19 +43,14 @@ class Bug:
         time.sleep(timestep)
 
 
-s1 = 10  
-s2 = 9  #toggle wrap
-s3 = 11  #speed
+s1, s2, s3 = 10, 9, 11
 for pin in [s1, s2, s3]:
     GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
-
 bug = Bug()
-last_s2_state = GPIO.input(s2)
-
 def toggle_wrap(channel):
     bug.isWrapOn = not bug.isWrapOn
-    print(f"Wrap mode toggled: {bug.isWrapOn}")
+    print("Wrap:", bug.isWrapOn)
 
 GPIO.add_event_detect(s2, GPIO.BOTH, callback=toggle_wrap, bouncetime=300)
 
@@ -69,11 +62,13 @@ try:
         else:
             if bug.active:
                 bug.stop()
-        if GPIO.input(s3):
-            current_step = bug.timestep / 3
-        else:
-            current_step = bug.timestep
-        bug.step(current_step)
+
+        quick = bug.timestep / 3.0 if GPIO.input(s3) else bug.timestep
+        bug.step(quick)
+
+
 except KeyboardInterrupt:
+    pass
+finally:
     bug.stop()
     GPIO.cleanup()
