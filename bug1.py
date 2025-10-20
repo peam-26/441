@@ -3,62 +3,75 @@ from shifter import Shifter
 import RPi.GPIO as GPIO
 import time
 import random
-import threading  # ADDED
+import threading  
 
-LED_COUNT = 8  # ADDED
-
-
-# ADDED: wrap existing behavior into a Bug class with required attributes and methods
 class Bug:
-    def __init__(self, timestep=0.1, x=3, isWrapOn=False, *, serial=23, latch=24, clock=25):
-        self.timestep = float(timestep)     # ADDED
-        self.x = int(x) % LED_COUNT         # ADDED
-        self.isWrapOn = bool(isWrapOn)      # ADDED
+    def __init__(self, timestep=0.1, x=3, isWrapOn=False):
+        self.timestep = timestep
+        self.x = x      
+        self.isWrapOn = isWrapOn  
+        self.__shifter = Shifter(23, 24, 25)
+        self.active = False
 
-        self.__shifter = Shifter(serial=serial, latch=latch, clock=clock)  # ADDED (private)
-        self.__stop_evt = threading.Event()  # ADDED
-        self.__thread = None                 # ADDED
+    def start(self):
+        self.actiive = True
 
-    def __run(self):  # ADDED (internal loop using your original logic)
-        pos = self.x
-        try:
-            while not self.__stop_evt.is_set():
-                self.__shifter.shiftByte(1 << pos)
-                time.sleep(self.timestep)
-
-                step = random.choice((-1, 1))
-                nxtpos = pos + step
-
-                # Bounce if you hit the edges (keep inside 0–7) — SAME LOGIC
-                if self.isWrapOn:
-                    nxtpos %= LED_COUNT
-                else:
-                    if nxtpos < 0 or nxtpos >= LED_COUNT:
-                        step = -step
-                        nxtpos = pos + step
-
-                pos = nxtpos
-                self.x = pos  # keep x updated
-        finally:
-            pass
-
-    def start(self):  # ADDED
-        if self.__thread and self.__thread.is_alive():
-            return
-        self.__stop_evt.clear()
-        self.__thread = threading.Thread(target=self.__run, daemon=True)
-        self.__thread.start()
-
-    def stop(self):  # ADDED
-        self.__stop_evt.set()
-        if self.__thread:
-            self.__thread.join(timeout=self.timestep * 2 + 0.1)
+    def stop(self):
+        self._running = False
         self.__shifter.shiftByte(0)
-        GPIO.cleanup()
+
+    def step(self, timestep)
+        if not self.active:
+            time.sleep(timestep)
+            return
+
+        self.__shifter.shiftByte(1 << self.x) # show current position
+
+        step = 1 if random.getrandbits(1) else -1
+        nxt  = self.x + step
 
 
-# OPTIONAL: quick usage (no main guard since you asked to avoid it)
-# Comment these three lines out if you don’t want it to auto-run.
-bug = Bug(timestep=0.05, x=0, isWrapOn=False)  # ADDED
-bug.start()                                     # ADDED
-# Press Ctrl+C to stop; or call bug.stop() from elsewhere.
+        if self.isWrapOn:
+            self.x = nxt % 8
+        else:
+            #if outside bounds, reverse the step
+            if not (0 <= nxt < 8):
+                self.x = self.x - step
+            else:
+                self.x = nxt
+
+        time.sleep(timestep)
+
+
+s1 = 10  
+s2 = 9  #toggle wrap
+s3 = 11  #speed
+for pin in [s1, s2, s3]:
+    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+
+bug = Bug()
+last_s2_state = GPIO.input(s2)
+
+def toggle_wrap(channel):
+    bug.isWrapOn = not bug.isWrapOn
+    print(f"Wrap mode toggled: {bug.isWrapOn}")
+
+GPIO.add_event_detect(s2, GPIO.BOTH, callback=toggle_wrap, bouncetime=300)
+
+try:
+    while True:
+        if GPIO.input(s1):
+            if not bug._running:
+                bug.start()
+        else:
+            if bug._running:
+                bug.stop()
+        if GPIO.input(s3):
+            current_step = bug.timestep / 3
+        else:
+            current_step = bug.timestep
+        bug.step(current_step)
+except KeyboardInterrupt:
+    bug.stop()
+    GPIO.cleanup()
