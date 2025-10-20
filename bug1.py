@@ -16,10 +16,10 @@ class Bug:
         self.active = False
 
     def start(self):
-        self.actiive = True
+        self.active = True
 
     def stop(self):
-        self._running = False
+        self.active = False
         self.__shifter.shiftByte(0)
 
     def step(self, timestep):
@@ -64,10 +64,10 @@ GPIO.add_event_detect(s2, GPIO.BOTH, callback=toggle_wrap, bouncetime=300)
 try:
     while True:
         if GPIO.input(s1):
-            if not bug._running:
+            if not bug.active:
                 bug.start()
         else:
-            if bug._running:
+            if bug.active:
                 bug.stop()
         if GPIO.input(s3):
             current_step = bug.timestep / 3
