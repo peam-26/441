@@ -20,7 +20,7 @@ class Bug:
         self._running = False
         self.__shifter.shiftByte(0)
 
-    def step(self, timestep)
+    def step(self, timestep):
         if not self.active:
             time.sleep(timestep)
             return
