@@ -4,6 +4,8 @@ import RPi.GPIO as GPIO
 import time
 import random
 import threading  
+GPIO.setmode(GPIO.BCM)
+
 
 class Bug:
     def __init__(self, timestep=0.1, x=3, isWrapOn=False):
