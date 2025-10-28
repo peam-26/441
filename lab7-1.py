@@ -1,11 +1,11 @@
-# led_webserver.py — socket-based POST form controlling 3 LED PWMs (no JS)
+# led_webserver_no_urllib_no_atexit.py
+# Raw-socket POST form controlling 3 LED PWMs (no JS, no urllib.parse, no atexit)
 
 import socket
-import urllib.parse
 import RPi.GPIO as GPIO
 import time
-import atexit
 
+# ---------------- GPIO / PWM SETUP ----------------
 GPIO.setmode(GPIO.BCM)
 LED_PINS = (12, 16, 20)   # BCM pins for LED1..LED3
 PWM_FREQ = 1000
@@ -19,20 +19,58 @@ for pwm in pwms:
 
 levels = [0, 0, 0]  # brightness 0–100 for each LED
 
-def set_level(idx: int, val: int):
+def set_level(idx, val):
     if idx not in (0, 1, 2):
         return
     v = max(0, min(100, int(val)))
     levels[idx] = v
     pwms[idx].ChangeDutyCycle(v)
 
-@atexit.register
-def _cleanup():
+def cleanup():
     for pwm in pwms:
-        pwm.stop()
+        try:
+            pwm.stop()
+        except Exception:
+            pass
     GPIO.cleanup()
 
-def html_page(active_led: int = 0, slider_val: int | None = None) -> bytes:
+# ---------------- URL-DECODE + FORM PARSE (no urllib.parse) ----------------
+def url_decode(s):
+    # decode application/x-www-form-urlencoded: '+' => space, %HH => byte
+    out = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == '+':
+            out.append(' ')
+            i += 1
+        elif c == '%' and i + 2 < len(s):
+            hexpart = s[i+1:i+3]
+            try:
+                out.append(bytes([int(hexpart, 16)]).decode('utf-8', errors='ignore'))
+                i += 3
+            except ValueError:
+                out.append('%'); i += 1
+        else:
+            out.append(c); i += 1
+    return ''.join(out)
+
+def parse_form_urlencoded(body_bytes):
+    qs = body_bytes.decode('utf-8', errors='ignore')
+    pairs = qs.split('&') if qs else []
+    d = {}
+    for pair in pairs:
+        if not pair:
+            continue
+        if '=' in pair:
+            k, v = pair.split('=', 1)
+        else:
+            k, v = pair, ''
+        d[url_decode(k)] = url_decode(v)
+    return d
+
+# ---------------- HTML ----------------
+def html_page(active_led=0, slider_val=None):
     if slider_val is None:
         slider_val = levels[active_led]
     chk0 = "checked" if active_led == 0 else ""
@@ -93,7 +131,8 @@ def html_page(active_led: int = 0, slider_val: int | None = None) -> bytes:
     )
     return html.encode("utf-8")
 
-def parse_request(data: bytes):
+# ---------------- HTTP PARSING ----------------
+def parse_request(data):
     try:
         head, body = data.split(b"\r\n\r\n", 1)
     except ValueError:
@@ -107,7 +146,7 @@ def parse_request(data: bytes):
     for line in lines[1:]:
         if b":" in line:
             k, v = line.split(b":", 1)
-            headers[k.decode().strip().lower()] = v.decode().strip()
+            headers[k.decode("iso-8859-1").strip().lower()] = v.decode("iso-8859-1").strip()
     return method, path, headers, body
 
 def read_full_request(conn):
@@ -115,7 +154,7 @@ def read_full_request(conn):
     data = conn.recv(4096)
     if not data:
         return b""
-    method, path, headers, body = parse_request(data)
+    method, _, headers, body = parse_request(data)
     if method == "POST":
         cl = int(headers.get("content-length", "0") or "0")
         have = len(body)
@@ -128,15 +167,11 @@ def read_full_request(conn):
         return head + b"\r\n\r\n" + body
     return data
 
-def parse_form_urlencoded(body: bytes) -> dict:
-    s = body.decode("utf-8", errors="ignore")
-    return {k: (v[0] if isinstance(v, list) else v)
-            for k, v in urllib.parse.parse_qs(s, keep_blank_values=True).items()}
-
+# ---------------- SERVER ----------------
 def serve():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("", 80))   # use 80 if you want (requires sudo)
+    s.bind(("", 8080))   # use 80 if you want (requires sudo)
     s.listen(3)
     print("Serving on http://0.0.0.0:8080")
     try:
@@ -146,8 +181,10 @@ def serve():
             try:
                 raw = read_full_request(conn)
                 if not raw:
-                    conn.close(); continue
-                method, path, headers, body = parse_request(raw)
+                    conn.close()
+                    continue
+
+                method, _, _, body = parse_request(raw)
 
                 active_led = 0
                 slider_val = None
@@ -171,7 +208,7 @@ def serve():
                     b"HTTP/1.1 200 OK",
                     b"Content-Type: text/html; charset=utf-8",
                     b"Connection: close",
-                    f"Content-Length: {len(body_bytes)}".encode(),
+                    f"Content-Length: {len(body_bytes)}".encode("ascii"),
                     b"\r\n",
                 ]
                 conn.sendall(b"\r\n".join(headers_out) + body_bytes)
@@ -181,6 +218,7 @@ def serve():
         print("\nShutting down...")
     finally:
         s.close()
+        cleanup()
 
 if __name__ == "__main__":
     serve()
