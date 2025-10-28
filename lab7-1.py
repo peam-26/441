@@ -1,13 +1,11 @@
-# led_webserver_no_urllib_no_atexit.py
-# Raw-socket POST form controlling 3 LED PWMs (no JS, no urllib.parse, no atexit)
+# led_webserver_no_urllib_no_atexit.py  (timeout-safe)
 
 import socket
 import RPi.GPIO as GPIO
 import time
 
-# ---------------- GPIO / PWM SETUP ----------------
 GPIO.setmode(GPIO.BCM)
-LED_PINS = (12, 16, 20)   # BCM pins for LED1..LED3
+LED_PINS = (12, 16, 20)
 PWM_FREQ = 1000
 
 for p in LED_PINS:
@@ -17,12 +15,16 @@ pwms = [GPIO.PWM(p, PWM_FREQ) for p in LED_PINS]
 for pwm in pwms:
     pwm.start(0)
 
-levels = [0, 0, 0]  # brightness 0–100 for each LED
+levels = [0, 0, 0]
 
 def set_level(idx, val):
     if idx not in (0, 1, 2):
         return
-    v = max(0, min(100, int(val)))
+    try:
+        v = int(val)
+    except (ValueError, TypeError):
+        v = 0
+    v = max(0, min(100, v))
     levels[idx] = v
     pwms[idx].ChangeDutyCycle(v)
 
@@ -34,20 +36,15 @@ def cleanup():
             pass
     GPIO.cleanup()
 
-# ---------------- URL-DECODE + FORM PARSE (no urllib.parse) ----------------
 def url_decode(s):
-    # decode application/x-www-form-urlencoded: '+' => space, %HH => byte
-    out = []
-    i = 0
+    out, i = [], 0
     while i < len(s):
         c = s[i]
         if c == '+':
-            out.append(' ')
-            i += 1
+            out.append(' '); i += 1
         elif c == '%' and i + 2 < len(s):
-            hexpart = s[i+1:i+3]
             try:
-                out.append(bytes([int(hexpart, 16)]).decode('utf-8', errors='ignore'))
+                out.append(bytes([int(s[i+1:i+3], 16)]).decode('utf-8', errors='ignore'))
                 i += 3
             except ValueError:
                 out.append('%'); i += 1
@@ -62,21 +59,16 @@ def parse_form_urlencoded(body_bytes):
     for pair in pairs:
         if not pair:
             continue
-        if '=' in pair:
-            k, v = pair.split('=', 1)
-        else:
-            k, v = pair, ''
+        k, v = (pair.split('=', 1) + [''])[:2]
         d[url_decode(k)] = url_decode(v)
     return d
 
-# ---------------- HTML ----------------
 def html_page(active_led=0, slider_val=None):
     if slider_val is None:
         slider_val = levels[active_led]
     chk0 = "checked" if active_led == 0 else ""
     chk1 = "checked" if active_led == 1 else ""
     chk2 = "checked" if active_led == 2 else ""
-
     html = """\
 <html>
 <head>
@@ -131,14 +123,13 @@ def html_page(active_led=0, slider_val=None):
     )
     return html.encode("utf-8")
 
-# ---------------- HTTP PARSING ----------------
 def parse_request(data):
     try:
         head, body = data.split(b"\r\n\r\n", 1)
     except ValueError:
         head, body = data, b""
     lines = head.split(b"\r\n")
-    request_line = lines[0].decode("iso-8859-1")
+    request_line = (lines[0] if lines else b"").decode("iso-8859-1")
     parts = request_line.split()
     method = parts[0] if len(parts) > 0 else ""
     path = parts[1] if len(parts) > 1 else "/"
@@ -149,29 +140,41 @@ def parse_request(data):
             headers[k.decode("iso-8859-1").strip().lower()] = v.decode("iso-8859-1").strip()
     return method, path, headers, body
 
+# ---- FIXED: don’t crash on timeouts ----
 def read_full_request(conn):
-    conn.settimeout(2.0)
-    data = conn.recv(4096)
+    try:
+        conn.settimeout(5.0)               # a bit longer
+        data = conn.recv(4096)
+    except TimeoutError:
+        return b""                         # no request yet; caller will continue loop
+    except Exception:
+        return b""
     if not data:
         return b""
     method, _, headers, body = parse_request(data)
     if method == "POST":
-        cl = int(headers.get("content-length", "0") or "0")
+        try:
+            cl = int(headers.get("content-length", "0") or "0")
+        except ValueError:
+            cl = 0
         have = len(body)
         while have < cl:
-            chunk = conn.recv(4096)
+            try:
+                chunk = conn.recv(4096)
+            except TimeoutError:
+                break
             if not chunk:
                 break
             body += chunk
+            have = len(body)
         head = data.split(b"\r\n\r\n", 1)[0]
         return head + b"\r\n\r\n" + body
     return data
 
-# ---------------- SERVER ----------------
 def serve():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("", 80))   # use 80 if you want (requires sudo)
+    s.bind(("", 8080))
     s.listen(3)
     print("Serving on http://0.0.0.0:8080")
     try:
@@ -181,27 +184,29 @@ def serve():
             try:
                 raw = read_full_request(conn)
                 if not raw:
-                    conn.close()
+                    # no valid HTTP data; return a minimal response so browsers don’t hang
+                    try:
+                        conn.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                    finally:
+                        conn.close()
                     continue
 
                 method, _, _, body = parse_request(raw)
 
-                active_led = 0
-                slider_val = None
-
+                active_led, slider_val = 0, None
                 if method == "POST":
                     form = parse_form_urlencoded(body)
-                    try:
-                        idx = int(form.get("led", "0"))
-                    except ValueError:
-                        idx = 0
-                    try:
-                        bright = int(form.get("brightness", "0"))
-                    except ValueError:
-                        bright = 0
+                    idx = form.get("led", "0")
+                    bright = form.get("brightness", "0")
                     set_level(idx, bright)
-                    active_led = idx
-                    slider_val = bright
+                    try:
+                        active_led = int(idx)
+                    except (ValueError, TypeError):
+                        active_led = 0
+                    try:
+                        slider_val = int(bright)
+                    except (ValueError, TypeError):
+                        slider_val = None
 
                 body_bytes = html_page(active_led, slider_val)
                 headers_out = [
