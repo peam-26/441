@@ -218,6 +218,7 @@ def serve():
             finally:
                 conn.close()
     except KeyboardInterrupt:
+        pass
     finally:
         s.close()
         cleanup()
