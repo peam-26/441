@@ -174,7 +174,7 @@ def read_full_request(conn):
 def serve():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("", 8080))
+    s.bind(("", 80))
     s.listen(3)
     print("Serving on http://0.0.0.0:8080")
     try:
