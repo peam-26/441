@@ -83,20 +83,36 @@ def html_page(active_led=0, slider_val=None):
   <title>LED Brightness</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
 </head>
-<body style="font-family: system-ui, sans-serif; margin: .75rem;">
+<body style="font-family: Georgia, 'Times New Roman', Times, serif; margin:.75rem;">
   <form method="POST" action="/">
-    <fieldset style="border:1px solid #888; border-radius:6px; padding:.8rem 1rem; width: 340px;">
-      <div><strong>Brightness level:</strong></div>
+    <fieldset style="border:1px solid #888; border-radius:6px; padding:.8rem 1rem; width:340px;">
+      <div style="font-size:18px; margin-bottom:6px;">Brightness level:</div>
       <input type="range" name="brightness" min="0" max="100" value="{slider}"
-             style="display:block; width:100%; margin-top:6px; margin-bottom:16px;">
+             style="display:block; width:100%; margin-bottom:14px;">
 
-      <div style="margin-top:8px; margin-bottom:6px;"><strong>Select LED:</strong></div>
-      <div style="margin:4px 0;"><label><input type="radio" name="led" value="0" {chk0}> LED 1 ({l0}%)</label></div>
-      <div style="margin:4px 0;"><label><input type="radio" name="led" value="1" {chk1}> LED 2 ({l1}%)</label></div>
-      <div style="margin:4px 0;"><label><input type="radio" name="led" value="2" {chk2}> LED 3 ({l2}%)</label></div>
+      <div style="font-size:18px; margin:10px 0 6px;">Select LED:</div>
+
+      <div style="margin:4px 0;">
+        <label>
+          <input type="radio" name="led" value="0" {chk0}>
+          LED 1 ({l0}%)
+        </label>
+      </div>
+      <div style="margin:4px 0;">
+        <label>
+          <input type="radio" name="led" value="1" {chk1}>
+          LED 2 ({l1}%)
+        </label>
+      </div>
+      <div style="margin:4px 0;">
+        <label>
+          <input type="radio" name="led" value="2" {chk2}>
+          LED 3 ({l2}%)
+        </label>
+      </div>
 
       <button type="submit"
-              style="display:block; margin-top:16px; padding:.45rem .75rem; border:1px solid #666; border-radius:6px; background:#eee;">
+              style="display:block; margin-top:14px; padding:.45rem .75rem; border:1px solid #666; border-radius:6px; background:#eee;">
         Change Brightness
       </button>
     </fieldset>
@@ -109,6 +125,7 @@ def html_page(active_led=0, slider_val=None):
         l0=levels[0], l1=levels[1], l2=levels[2]
     )
     return html.encode("utf-8")
+
 
 
 def parse_request(data):
