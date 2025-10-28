@@ -18,15 +18,22 @@ for pwm in pwms:
 levels = [0, 0, 0]
 
 def set_level(idx, val):
-    if idx not in (0, 1, 2):
+    # accept strings or ints
+    try:
+        i = int(idx)
+    except (ValueError, TypeError):
         return
+    if i not in (0, 1, 2):
+        return
+
     try:
         v = int(val)
     except (ValueError, TypeError):
         v = 0
     v = max(0, min(100, v))
-    levels[idx] = v
-    pwms[idx].ChangeDutyCycle(v)
+
+    levels[i] = v
+    pwms[i].ChangeDutyCycle(v)
 
 def cleanup():
     for pwm in pwms:
