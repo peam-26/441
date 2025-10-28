@@ -175,7 +175,6 @@ def serve():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("", 80))
     s.listen(3)
-    print("Serving on http://0.0.0.0:8080")
     try:
         while True:
             time.sleep(0.05)
