@@ -76,51 +76,31 @@ def html_page(active_led=0, slider_val=None):
     chk0 = "checked" if active_led == 0 else ""
     chk1 = "checked" if active_led == 1 else ""
     chk2 = "checked" if active_led == 2 else ""
+
     html = """\
 <html>
 <head>
   <title>LED Brightness</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    body {{ font-family: system-ui, sans-serif; margin: 2rem; max-width: 600px; }}
-    fieldset {{ border: 1px solid #ccc; padding: 1rem; border-radius: .5rem; }}
-    legend {{ font-weight: 700; }}
-    .row {{ margin: .75rem 0; }}
-    .levels {{ margin-top: 1.25rem; padding: 1rem; background:#f7f7f7; border-radius:.5rem; }}
-    button {{ padding:.5rem 1rem; border-radius:.5rem; border:1px solid #333; background:#eee; cursor:pointer; }}
-  </style>
 </head>
-<body>
-  <h1>LED Brightness Controller</h1>
+<body style="font-family: system-ui, sans-serif; margin: .75rem;">
   <form method="POST" action="/">
-    <fieldset>
-      <legend>Select LED</legend>
-      <div class="row">
-        <label><input type="radio" name="led" value="0" {chk0}> LED 1</label><br>
-        <label><input type="radio" name="led" value="1" {chk1}> LED 2</label><br>
-        <label><input type="radio" name="led" value="2" {chk2}> LED 3</label>
-      </div>
-    </fieldset>
+    <fieldset style="border:1px solid #888; border-radius:6px; padding:.8rem 1rem; width: 340px;">
+      <div><strong>Brightness level:</strong></div>
+      <input type="range" name="brightness" min="0" max="100" value="{slider}"
+             style="display:block; width:100%; margin-top:6px; margin-bottom:16px;">
 
-    <fieldset style="margin-top:1rem;">
-      <legend>Brightness (0–100%)</legend>
-      <div class="row">
-        <input type="range" name="brightness" min="0" max="100" value="{slider}">
-        <span>{slider}%</span>
-      </div>
-    </fieldset>
+      <div style="margin-top:8px; margin-bottom:6px;"><strong>Select LED:</strong></div>
+      <div style="margin:4px 0;"><label><input type="radio" name="led" value="0" {chk0}> LED 1 ({l0}%)</label></div>
+      <div style="margin:4px 0;"><label><input type="radio" name="led" value="1" {chk1}> LED 2 ({l1}%)</label></div>
+      <div style="margin:4px 0;"><label><input type="radio" name="led" value="2" {chk2}> LED 3 ({l2}%)</label></div>
 
-    <div class="row" style="margin-top:1rem;">
-      <button type="submit">Set Brightness</button>
-    </div>
+      <button type="submit"
+              style="display:block; margin-top:16px; padding:.45rem .75rem; border:1px solid #666; border-radius:6px; background:#eee;">
+        Change Brightness
+      </button>
+    </fieldset>
   </form>
-
-  <div class="levels">
-    <strong>Current Levels</strong>
-    <div>LED 1: {l0}%</div>
-    <div>LED 2: {l1}%</div>
-    <div>LED 3: {l2}%</div>
-  </div>
 </body>
 </html>
 """.format(
@@ -129,6 +109,7 @@ def html_page(active_led=0, slider_val=None):
         l0=levels[0], l1=levels[1], l2=levels[2]
     )
     return html.encode("utf-8")
+
 
 def parse_request(data):
     try:
