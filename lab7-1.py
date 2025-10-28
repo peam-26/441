@@ -1,5 +1,3 @@
-# led_webserver_no_urllib_no_atexit.py  (timeout-safe)
-
 import socket
 import RPi.GPIO as GPIO
 import time
@@ -18,7 +16,6 @@ for pwm in pwms:
 levels = [0, 0, 0]
 
 def set_level(idx, val):
-    # accept strings or ints
     try:
         i = int(idx)
     except (ValueError, TypeError):
@@ -126,8 +123,6 @@ def html_page(active_led=0, slider_val=None):
     )
     return html.encode("utf-8")
 
-
-
 def parse_request(data):
     try:
         head, body = data.split(b"\r\n\r\n", 1)
@@ -145,13 +140,12 @@ def parse_request(data):
             headers[k.decode("iso-8859-1").strip().lower()] = v.decode("iso-8859-1").strip()
     return method, path, headers, body
 
-# ---- FIXED: don’t crash on timeouts ----
 def read_full_request(conn):
     try:
-        conn.settimeout(5.0)               # a bit longer
+        conn.settimeout(5.0)               
         data = conn.recv(4096)
     except TimeoutError:
-        return b""                         # no request yet; caller will continue loop
+        return b""                         
     except Exception:
         return b""
     if not data:
@@ -189,7 +183,6 @@ def serve():
             try:
                 raw = read_full_request(conn)
                 if not raw:
-                    # no valid HTTP data; return a minimal response so browsers don’t hang
                     try:
                         conn.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
                     finally:
@@ -225,7 +218,6 @@ def serve():
             finally:
                 conn.close()
     except KeyboardInterrupt:
-        print("\nShutting down...")
     finally:
         s.close()
         cleanup()
