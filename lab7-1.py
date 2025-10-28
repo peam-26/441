@@ -136,7 +136,7 @@ def parse_form_urlencoded(body: bytes) -> dict:
 def serve():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("", 8080))   # use 80 if you want (requires sudo)
+    s.bind(("", 80))   # use 80 if you want (requires sudo)
     s.listen(3)
     print("Serving on http://0.0.0.0:8080")
     try:
