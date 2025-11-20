@@ -1,13 +1,14 @@
 ################################################################################
-# WEB + STEPPER MOTORS + LASER CONTROL (LIVE SLIDERS, -180..180, DEBUG)
+# WEB + STEPPER MOTORS + LASER CONTROL (LIVE SLIDERS, SIMPLE / NO MULTIPROCESSING)
 ################################################################################
 
 import time
-import multiprocessing
 import socket
 import threading
-from shifter import Shifter          # make sure shifter.py defines class Shifter
+from shifter import Shifter     # make sure shifter.py defines class Shifter
 import RPi.GPIO as GPIO
+
+print("Script starting...")
 
 # --------------------------- GPIO / GLOBALS -----------------------------------
 
@@ -16,8 +17,8 @@ LASER_PIN = 17
 GPIO.setup(LASER_PIN, GPIO.OUT)
 GPIO.output(LASER_PIN, GPIO.LOW)
 
-# Shared array for 2 motors (each uses 4 bits in a nibble)
-myArray = multiprocessing.Array('i', 2)
+# Two nibbles packed into one byte (index 0 → lower 4 bits, index 1 → upper 4)
+myArray = [0, 0]
 
 
 # ------------------------------ STEPPER CLASS ---------------------------------
@@ -29,21 +30,12 @@ class Stepper:
     delay = 3000                      # microseconds between steps
     steps_per_degree = 2048 / 360.0   # 28BYJ-48 typical
 
-    def __init__(self, shifter, lock, index):
+    def __init__(self, shifter, index):
         self.s = shifter
-        self.lock = lock      # shared lock (both motors share same shift register)
         self.index = index    # 0 or 1
         self.angle = 0.0      # current angle in degrees, kept in [-180, 180]
         self.step_state = 0   # index into seq[]
         self.shifter_bit_start = 4 * index  # which nibble in the byte
-
-    def _sgn(self, x):
-        if x > 0:
-            return 1
-        elif x < 0:
-            return -1
-        else:
-            return 0
 
     def _normalize_angle(self, a):
         """Keep angle in [-180, 180]."""
@@ -54,45 +46,38 @@ class Stepper:
         return a
 
     def _step(self, direction):
-        with self.lock:
-            # Update sequence index
-            self.step_state = (self.step_state + direction) % 8
+        # Update sequence index
+        self.step_state = (self.step_state + direction) % 8
 
-            # Put this motor's 4-bit pattern into its nibble
-            myArray[self.index] &= ~(0b1111 << self.shifter_bit_start)
-            myArray[self.index] |= (Stepper.seq[self.step_state] << self.shifter_bit_start)
+        # Put this motor's 4-bit pattern into its nibble
+        myArray[self.index] &= ~(0b1111 << self.shifter_bit_start)
+        myArray[self.index] |= (Stepper.seq[self.step_state] << self.shifter_bit_start)
 
-            # Combine all nibble values into a single byte
-            final = 0
-            for val in myArray:
-                final |= val
+        # Combine both motors' nibbles into a single byte
+        final = 0
+        for val in myArray:
+            final |= val
 
-            # Shift out to 74HC595
-            self.s.shiftByte(final)
+        # Shift out to 74HC595
+        self.s.shiftByte(final)
 
-        # Update angle (outside the lock)
+        # Update angle
         self.angle += direction / Stepper.steps_per_degree
         self.angle = self._normalize_angle(self.angle)
 
         time.sleep(Stepper.delay / 1e6)
 
-    def _rotate(self, delta):
-        direction = self._sgn(delta)
-        steps = int(abs(delta) * Stepper.steps_per_degree)
-        for _ in range(steps):
-            self._step(direction)
-
     def rotate(self, delta):
         """
         Relative rotation by `delta` degrees (can be positive or negative).
-        Runs in a separate process so the HTTP handler doesn't block.
+        Blocking (no multiprocessing).
         """
         if delta == 0:
-            return None
-        p = multiprocessing.Process(target=self._rotate, args=(delta,))
-        p.daemon = True
-        p.start()
-        return p
+            return
+        direction = 1 if delta > 0 else -1
+        steps = int(abs(delta) * Stepper.steps_per_degree)
+        for _ in range(steps):
+            self._step(direction)
 
     def goAngle(self, target):
         """
@@ -101,12 +86,12 @@ class Stepper:
         target = max(-180.0, min(180.0, float(target)))
         current = self.angle
         delta = target - current
-        # Clamp if someone sends something crazy
+        # protect against weird deltas, just in case
         if delta > 180:
             delta -= 360
         elif delta < -180:
             delta += 360
-        return self.rotate(delta)
+        self.rotate(delta)
 
     def zero(self):
         self.angle = 0.0
@@ -129,4 +114,167 @@ def parsePOSTdata(data):
     if idx == -1:
         return data_dict
     post = data[idx + 4:]
-    pair
+    pairs = post.split('&')
+    for p in pairs:
+        if '=' in p:
+            key, val = p.split('=', 1)
+            data_dict[key] = val
+    return data_dict
+
+
+def web_page(m1_angle, m2_angle):
+    """
+    HTML UI with JS sliders for live control.
+    Sliders are -180..180, centered at 0.
+    """
+    html = f"""
+    <html>
+    <head>
+        <title>Turret Control</title>
+        <style>
+            body {{
+                font-family: Arial;
+                text-align: center;
+                margin-top: 40px;
+            }}
+            .slider-container {{
+                width: 60%;
+                margin: 0 auto 30px auto;
+            }}
+            input[type=range] {{
+                width: 100%;
+            }}
+        </style>
+        <script>
+            function send(body) {{
+                var x = new XMLHttpRequest();
+                x.open("POST", "/", true);
+                x.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+                x.send(body);
+            }}
+
+            function setM1(v) {{
+                document.getElementById("m1_val").innerHTML = v + "°";
+                send("m1=" + encodeURIComponent(v));
+            }}
+
+            function setM2(v) {{
+                document.getElementById("m2_val").innerHTML = v + "°";
+                send("m2=" + encodeURIComponent(v));
+            }}
+
+            function laserTest() {{
+                send("laser_test=1");
+            }}
+        </script>
+    </head>
+    <body>
+        <h2>Stepper Motor + Laser Control</h2>
+
+        <div class="slider-container">
+            <h3>Motor 1 (Azimuth)</h3>
+            <input type="range" min="-180" max="180" value="{m1_angle:.1f}"
+                   oninput="setM1(this.value)">
+            <div>Angle: <span id="m1_val">{m1_angle:.1f}°</span></div>
+        </div>
+
+        <div class="slider-container">
+            <h3>Motor 2 (Altitude)</h3>
+            <input type="range" min="-180" max="180" value="{m2_angle:.1f}"
+                   oninput="setM2(this.value)">
+            <div>Angle: <span id="m2_val">{m2_angle:.1f}°</span></div>
+        </div>
+
+        <button onclick="laserTest()">Test Laser (3s)</button>
+    </body>
+    </html>
+    """
+    return html.encode('utf-8')
+
+
+# ------------------------------- WEB SERVER -----------------------------------
+def serve_web(m1, m2):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('', 8080))
+    s.listen(3)
+    print("Web server running on port 8080...")
+
+    try:
+        while True:
+            conn, addr = s.accept()
+            try:
+                msg = conn.recv(4096).decode('utf-8', errors='ignore')
+                if not msg:
+                    conn.close()
+                    continue
+
+                if msg.startswith("POST"):
+                    data = parsePOSTdata(msg)
+
+                    # Slider angle for Motor 1
+                    if "m1" in data and data["m1"].strip() != "":
+                        try:
+                            m1_target = float(data["m1"])
+                            m1.goAngle(m1_target)
+                        except ValueError:
+                            pass
+
+                    # Slider angle for Motor 2
+                    if "m2" in data and data["m2"].strip() != "":
+                        try:
+                            m2_target = float(data["m2"])
+                            m2.goAngle(m2_target)
+                        except ValueError:
+                            pass
+
+                    # Laser test
+                    if "laser_test" in data:
+                        threading.Thread(target=test_laser, daemon=True).start()
+
+                # Always respond with current angles (page reload / initial load)
+                response_body = web_page(m1.angle, m2.angle)
+                header = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                conn.sendall(header + response_body)
+
+            finally:
+                conn.close()
+    finally:
+        s.close()
+
+
+# ----------------------------------- MAIN -------------------------------------
+def main():
+    # One shared shifter for both motors
+    s = Shifter(23, 24, 25)
+
+    m1 = Stepper(s, 0)   # Motor 1 (azimuth)
+    m2 = Stepper(s, 1)   # Motor 2 (altitude)
+
+    m1.zero()
+    m2.zero()
+
+    # Start web server thread
+    t = threading.Thread(target=serve_web, args=(m1, m2), daemon=True)
+    t.start()
+
+    print("Motors initialized. Web interface ready.")
+    print("Open a browser to: http://<raspberry-pi-ip>:8080")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Exiting.")
+    finally:
+        GPIO.cleanup()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        import traceback
+        print("FATAL ERROR:")
+        traceback.print_exc()
+        GPIO.cleanup()
