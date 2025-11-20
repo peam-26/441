@@ -1,10 +1,12 @@
 ################################################################################
-# WEB + STEPPER MOTORS + LASER CONTROL (COMBINED VERSION)
+# WEB + STEPPER MOTORS + LASER CONTROL (WITH DIRECTION BUTTONS)
 #
 # - Two 28BYJ-48 steppers via 74HC595 shift register (Shifter class)
 # - Simple HTML page (port 8080) to:
-#       * Set Motor 1 angle (degrees)
-#       * Set Motor 2 angle (degrees)
+#       * Set Motor 1 angle (absolute, 0–360)
+#       * Set Motor 2 angle (absolute, 0–360)
+#       * Nudge Motor 1 ±10° (relative)
+#       * Nudge Motor 2 ±10° (relative)
 #       * Test laser for 3 seconds
 ################################################################################
 
@@ -22,7 +24,7 @@ LASER_PIN = 17
 GPIO.setup(LASER_PIN, GPIO.OUT)
 GPIO.output(LASER_PIN, GPIO.LOW)
 
-# Shared array for 2 motors (each uses 4 bits)
+# Shared array for 2 motors (each uses 4 bits in a nibble)
 myArray = multiprocessing.Array('i', 2)
 
 
@@ -37,7 +39,7 @@ class Stepper:
 
     def __init__(self, shifter, lock, index):
         self.s = shifter
-        self.lock = lock      # shared lock (both motors use same lock)
+        self.lock = lock      # shared lock (both motors share same shift register)
         self.index = index    # 0 or 1
         self.angle = 0.0      # current angle in degrees
         self.step_state = 0   # index into seq[]
@@ -79,16 +81,24 @@ class Stepper:
             self._step(direction)
 
     def rotate(self, delta):
-        # Run rotation in a separate process so HTTP handler doesn’t block
+        """
+        Relative rotation by `delta` degrees (can be positive or negative).
+        Runs in a separate process so the HTTP handler doesn't block.
+        """
+        if delta == 0:
+            return None
         p = multiprocessing.Process(target=self._rotate, args=(delta,))
+        p.daemon = True
         p.start()
         return p
 
     def goAngle(self, target):
-        # Move via shortest path
-        # Normalize to 0–360
+        """
+        Absolute move to `target` degrees using shortest path.
+        """
         target = target % 360.0
         current = self.angle % 360.0
+        # shortest-path delta in [-180, 180)
         delta = (target - current + 540.0) % 360.0 - 180.0
         return self.rotate(delta)
 
@@ -135,11 +145,15 @@ def web_page(m1_angle, m2_angle):
 
         <form action="/" method="POST">
             <h3>Motor 1 (Azimuth)</h3>
-            <input type="number" name="m1" value="{m1_angle:.1f}" step="1" min="0" max="360">
+            <input type="number" name="m1" value="{m1_angle:.1f}" step="1" min="0" max="360"><br><br>
+            <button type="submit" name="m1_rel" value="-10">M1 -10°</button>
+            <button type="submit" name="m1_rel" value="10">M1 +10°</button>
             <br><br>
 
             <h3>Motor 2 (Altitude)</h3>
-            <input type="number" name="m2" value="{m2_angle:.1f}" step="1" min="0" max="360">
+            <input type="number" name="m2" value="{m2_angle:.1f}" step="1" min="0" max="360"><br><br>
+            <button type="submit" name="m2_rel" value="-10">M2 -10°</button>
+            <button type="submit" name="m2_rel" value="10">M2 +10°</button>
             <br><br>
 
             <input type="submit" value="Rotate Motors">
@@ -175,20 +189,35 @@ def serve_web(m1, m2):
                 if msg.startswith("POST"):
                     data = parsePOSTdata(msg)
 
-                    # Motor 1
+                    # Absolute angle for Motor 1
                     if "m1" in data and data["m1"].strip() != "":
                         try:
                             m1_target = float(data["m1"])
-                            p = m1.goAngle(m1_target)
-                            # Don't join, let it run in background
+                            m1.goAngle(m1_target)
                         except ValueError:
                             pass
 
-                    # Motor 2
+                    # Absolute angle for Motor 2
                     if "m2" in data and data["m2"].strip() != "":
                         try:
                             m2_target = float(data["m2"])
-                            p = m2.goAngle(m2_target)
+                            m2.goAngle(m2_target)
+                        except ValueError:
+                            pass
+
+                    # Relative rotate Motor 1
+                    if "m1_rel" in data:
+                        try:
+                            delta1 = float(data["m1_rel"])   # + or -
+                            m1.rotate(delta1)
+                        except ValueError:
+                            pass
+
+                    # Relative rotate Motor 2
+                    if "m2_rel" in data:
+                        try:
+                            delta2 = float(data["m2_rel"])   # + or -
+                            m2.rotate(delta2)
                         except ValueError:
                             pass
 
