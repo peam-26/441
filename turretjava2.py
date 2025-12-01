@@ -40,7 +40,7 @@ class Stepper:
         self.step_state = (self.step_state + direction) % 8
 
         motor_patterns[self.index] = Stepper.seq[self.step_state]  # 0–15
-       final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
+        final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
 
         self.s.shiftByte(final)
 
