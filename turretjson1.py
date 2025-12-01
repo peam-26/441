@@ -96,7 +96,7 @@ def load_json_position():
     """
     try:
         print(f"Fetching JSON from {JSON_URL} ...")
-        response = requests.get(JSON_URL, timeout=5)
+        response = requests.get(JSON_URL, timeout=40)
         response.raise_for_status()
 
         data = response.json()
