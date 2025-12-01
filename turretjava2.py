@@ -1,7 +1,3 @@
-################################################################################
-# WEB + STEPPER MOTORS + LASER CONTROL (LIVE SLIDERS, SIMPLE, FIXED PATTERNS)
-################################################################################
-
 import time
 import socket
 import threading
@@ -10,20 +6,14 @@ import RPi.GPIO as GPIO
 
 print("Script starting...")
 
-# --------------------------- GPIO / GLOBALS -----------------------------------
-
 GPIO.setmode(GPIO.BCM)
 LASER_PIN = 17
 GPIO.setup(LASER_PIN, GPIO.OUT)
 GPIO.output(LASER_PIN, GPIO.LOW)
 
-# Two 4-bit patterns, one per motor (0–15 each)
 motor_patterns = [0, 0]
 
-
-# ------------------------------ STEPPER CLASS ---------------------------------
 class Stepper:
-    # Half-step sequence for 28BYJ-48
     seq = [0b0001, 0b0011, 0b0010, 0b0110,
            0b0100, 0b1100, 0b1000, 0b1001]
 
@@ -47,17 +37,11 @@ class Stepper:
     def _step(self, direction):
         global motor_patterns
 
-        # Update sequence index
         self.step_state = (self.step_state + direction) % 8
 
-        # Store this motor's 4-bit pattern
         motor_patterns[self.index] = Stepper.seq[self.step_state]  # 0–15
+       final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
 
-        # Pack both motors into one byte:
-        # motor 0 on low nibble (Q0–Q3), motor 1 on high nibble (Q4–Q7)
-        final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
-
-        # Shift out to 74HC595
         self.s.shiftByte(final)
 
         # Update angle
@@ -85,7 +69,6 @@ class Stepper:
         target = max(-180.0, min(180.0, float(target)))
         current = self.angle
         delta = target - current
-        # Protect against weird deltas, just in case
         if delta > 180:
             delta -= 360
         elif delta < -180:
@@ -95,15 +78,11 @@ class Stepper:
     def zero(self):
         self.angle = 0.0
 
-
-# ----------------------------- LASER CONTROL ----------------------------------
 def test_laser():
     GPIO.output(LASER_PIN, GPIO.HIGH)
     time.sleep(3)
     GPIO.output(LASER_PIN, GPIO.LOW)
 
-
-# ----------------------------- HTTP HELPERS -----------------------------------
 def parsePOSTdata(data):
     """
     Very simple x-www-form-urlencoded parser for the POST body.
@@ -192,7 +171,6 @@ def web_page(m1_angle, m2_angle):
     return html.encode('utf-8')
 
 
-# ------------------------------- WEB SERVER -----------------------------------
 def serve_web(m1, m2):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -242,8 +220,6 @@ def serve_web(m1, m2):
     finally:
         s.close()
 
-
-# ----------------------------------- MAIN -------------------------------------
 def main():
     # One shared shifter for both motors
     s = Shifter(23, 24, 25)
