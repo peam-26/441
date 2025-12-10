@@ -1,66 +1,56 @@
 ################################################################################
 # WEB + STEPPER MOTORS + LASER CONTROL
-#  - Auto JSON load for team 17 placement
-#  - Manual calibration: "Set as (0,0)" (center pole)
-#  - Auto sequence: aim at each other turret and fire laser for 3s
+#  - Auto JSON load for team 17 (placement)
+#  - Manual calibration via "Set as (0,0)" (center pole)
+#  - Auto sequence: aim at each other turret & fire for 3s
 ################################################################################
 
 import time
 import socket
 import threading
+import requests
 import json
 import math
-import urllib.request
-
-from shifter import Shifter
+from shifter import Shifter     # make sure shifter.py defines class Shifter
 import RPi.GPIO as GPIO
 
 print("Script starting...")
-
-# ----------------------- GPIO / LASER SETUP -----------------------------------
 
 GPIO.setmode(GPIO.BCM)
 LASER_PIN = 17
 GPIO.setup(LASER_PIN, GPIO.OUT)
 GPIO.output(LASER_PIN, GPIO.LOW)
 
-# ----------------------- JSON CONFIG -----------------------------------------
-
+# ---------- JSON CONFIG ----------
 JSON_URL = "http://192.168.1.254:8000/positions.json"
-TEAM_ID = "17"          # our team number for placement coordinates
-
-# Info to show on page
+TEAM_ID = "17"            # our team number for placement
 last_json_info = "No JSON loaded yet."
 
-# cached positions (full JSON)
+# cache of the full JSON data
 positions_data = None
 
-# motor coil patterns (4 bits per motor)
+# auto-sequence status
+auto_status = "Idle"
+auto_running = False
+
 motor_patterns = [0, 0]
 
 # calibration offsets: physical angle that corresponds to logical 0°
 calib_m1 = 0.0   # azimuth
 calib_m2 = 0.0   # altitude
 
-# auto sequence status
-auto_status = "Idle"
-auto_running = False
-
-
-# ----------------------- STEPPER CLASS ---------------------------------------
 
 class Stepper:
-    # half-step sequence for 28BYJ-48
     seq = [0b0001, 0b0011, 0b0010, 0b0110,
            0b0100, 0b1100, 0b1000, 0b1001]
 
-    delay = 3000                    # microseconds between steps
-    steps_per_degree = 2048 / 360.0 # 28BYJ-48 gear ratio 1:64
+    delay = 3000                      # microseconds between steps
+    steps_per_degree = 2048 / 360.0   # 28BYJ-48 typical
 
     def __init__(self, shifter, index):
         self.s = shifter
         self.index = index    # 0 or 1
-        self.angle = 0.0      # PHYSICAL angle in degrees, kept in [-180, 180]
+        self.angle = 0.0      # current *physical* angle in degrees, kept in [-180, 180]
         self.step_state = 0   # index into seq[]
 
     def _normalize_angle(self, a):
@@ -75,15 +65,12 @@ class Stepper:
 
         self.step_state = (self.step_state + direction) % 8
 
-        # store this motor's 4-bit pattern
-        motor_patterns[self.index] = Stepper.seq[self.step_state]
-
-        # pack both motors into one byte:
-        # motor 0 → low nibble, motor 1 → high nibble
+        motor_patterns[self.index] = Stepper.seq[self.step_state]  # 0–15
         final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
+
         self.s.shiftByte(final)
 
-        # update physical angle
+        # Update physical angle
         self.angle += direction / Stepper.steps_per_degree
         self.angle = self._normalize_angle(self.angle)
 
@@ -98,7 +85,7 @@ class Stepper:
             self._step(direction)
 
     def goAngle(self, target):
-        # target is a PHYSICAL angle in degrees
+        # target is a PHYSICAL angle
         target = max(-180.0, min(180.0, float(target)))
         current = self.angle
         delta = target - current
@@ -112,8 +99,6 @@ class Stepper:
         self.angle = 0.0
 
 
-# ----------------------- LASER CONTROL ---------------------------------------
-
 def laser_on():
     GPIO.output(LASER_PIN, GPIO.HIGH)
 
@@ -126,19 +111,18 @@ def test_laser():
     laser_off()
 
 
-# ----------------------- SIMPLE HELPERS --------------------------------------
-
 def parsePOSTdata(data):
-    d = {}
-    idx = data.find("\r\n\r\n")
+    data_dict = {}
+    idx = data.find('\r\n\r\n')
     if idx == -1:
-        return d
+        return data_dict
     post = data[idx + 4:]
-    for p in post.split("&"):
-        if "=" in p:
-            k, v = p.split("=", 1)
-            d[k] = v
-    return d
+    pairs = post.split('&')
+    for p in pairs:
+        if '=' in p:
+            key, val = p.split('=', 1)
+            data_dict[key] = val
+    return data_dict
 
 
 def normalize_angle(a):
@@ -148,7 +132,6 @@ def normalize_angle(a):
         a += 360
     return a
 
-
 def normalize_rad(x):
     while x > math.pi:
         x -= 2 * math.pi
@@ -156,37 +139,36 @@ def normalize_rad(x):
         x += 2 * math.pi
     return x
 
-
 def logical_from_physical(physical, calib):
     # logical = physical - calib
     return normalize_angle(physical - calib)
-
 
 def physical_from_logical(logical, calib):
     # physical target = calib + logical
     return normalize_angle(calib + logical)
 
 
-# ----------------------- JSON LOADING / GEOMETRY -----------------------------
-
-def fetch_positions():
+# ---------- JSON LOADING (AUTO ON START) ----------
+def load_positions_and_update_display():
     """
-    Fetch full JSON and cache in positions_data.
-    Also update last_json_info for our own team.
+    Fetch JSON and:
+      - cache full positions_data
+      - update last_json_info with our placement (r, theta) from JSON
     """
-    global positions_data, last_json_info
+    global last_json_info, positions_data
     try:
         print(f"Fetching JSON from {JSON_URL} ...")
-        with urllib.request.urlopen(JSON_URL, timeout=40) as resp:
-            raw = resp.read().decode("utf-8")
-            positions_data = json.loads(raw)
+        resp = requests.get(JSON_URL, timeout=40)
+        resp.raise_for_status()
+        data = resp.json()
+        positions_data = data
 
-        turret = positions_data["turrets"][TEAM_ID]
+        turret = data["turrets"][TEAM_ID]
         r = float(turret["r"])
         theta = float(turret["theta"])  # radians
 
         last_json_info = (
-            f"Team {TEAM_ID} placement (arena polar):\n"
+            f"Team {TEAM_ID} turret placement (arena polar):\n"
             f"  r     = {r:.2f} cm\n"
             f"  theta = {theta:.6f} rad"
         )
@@ -206,33 +188,29 @@ def compute_logical_azimuth_to_target(theta_self, theta_target):
     compute the LOGICAL azimuth angle (deg) we must rotate to aim from our turret
     to the target, assuming logical 0° is pointing at the arena center.
     """
-    # positions on unit circle (radius cancels)
     xs, ys = math.cos(theta_self), math.sin(theta_self)
     xt, yt = math.cos(theta_target), math.sin(theta_target)
 
-    # vector from us to target
-    vx, vy = xt - xs, yt - ys
+    vx, vy = xt - xs, yt - ys     # vector from us to target
     phi = math.atan2(vy, vx)      # global direction to target
 
-    # global direction from us to center (0,0) is theta_self + pi
+    # center direction from us: theta_self + pi
     phi_center = theta_self + math.pi
 
     d = normalize_rad(phi - phi_center)
     return math.degrees(d)
 
 
-# ----------------------- AUTO SEQUENCE ---------------------------------------
-
+# ---------- AUTO SEQUENCE ----------
 def auto_sequence(m1, m2):
     """
-    From current calibrated (0,0) position, aim at each other team's turret
-    in order and fire laser for 3 seconds each.
-    Altitude motor is not changed (assumed already calibrated to height).
+    From calibrated (0,0) position, aim at each other team's turret and
+    fire laser for 3s. Altitude is assumed already correct.
     """
     global auto_status, auto_running, positions_data, calib_m1, calib_m2
 
     if positions_data is None:
-        fetch_positions()
+        load_positions_and_update_display()
     if positions_data is None:
         auto_status = "Auto sequence aborted: no JSON data."
         return
@@ -247,14 +225,12 @@ def auto_sequence(m1, m2):
 
         theta_self = float(turrets[TEAM_ID]["theta"])
 
-        # logical altitude remains 0 (center height)
+        # altitude motor: keep logical 0 (whatever you calibrated for the center)
         logical_alt = 0.0
         phys_alt = physical_from_logical(logical_alt, calib_m2)
-
-        # move altitude motor to calibration height once
         m2.goAngle(phys_alt)
 
-        # iterate through teams in numeric order, skipping ourselves
+        # visit all other turrets in order
         for team_str, info in sorted(turrets.items(), key=lambda kv: int(kv[0])):
             if team_str == TEAM_ID:
                 continue
@@ -267,12 +243,11 @@ def auto_sequence(m1, m2):
             phys_az = physical_from_logical(logical_az, calib_m1)
             m1.goAngle(phys_az)
 
-            # fire laser for 3 seconds
+            # fire laser
             laser_on()
             time.sleep(3)
             laser_off()
 
-            # small pause between shots
             time.sleep(0.5)
 
         auto_status = "Auto sequence finished."
@@ -282,127 +257,122 @@ def auto_sequence(m1, m2):
         auto_running = False
 
 
-# ----------------------- WEB PAGE --------------------------------------------
-
 def web_page(log_m1_angle, log_m2_angle):
     """
-    HTML UI with:
-      - logical sliders (relative to calibrated (0,0))
-      - laser test
-      - Set as (0,0)
-      - Start Auto Sequence
-      - JSON info for team 17
-      - Auto sequence status
+    HTML UI:
+      - Sliders (logical angles, relative to calibrated (0,0))
+      - Test laser button
+      - Set as (0,0) button
+      - Start Auto Sequence button
+      - JSON info and auto sequence status
     """
     global last_json_info, auto_status
 
     html = f"""
-<html>
-<head>
-    <title>Turret Control</title>
-    <style>
-        body {{
-            font-family: Arial;
-            text-align: center;
-            margin-top: 40px;
-        }}
-        .slider-container {{
-            width: 60%;
-            margin: 0 auto 30px auto;
-        }}
-        input[type=range] {{
-            width: 100%;
-        }}
-        .box {{
-            margin: 20px auto;
-            padding: 15px;
-            border: 1px solid #444;
-            border-radius: 8px;
-            width: 70%;
-            text-align: left;
-            background: #f9f9f9;
-            white-space: pre-wrap;
-            font-family: monospace;
-        }}
-    </style>
-    <script>
-        function send(body) {{
-            var x = new XMLHttpRequest();
-            x.open("POST", "/", true);
-            x.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-            x.send(body);
-        }}
+    <html>
+    <head>
+        <title>Turret Control</title>
+        <style>
+            body {{
+                font-family: Arial;
+                text-align: center;
+                margin-top: 40px;
+            }}
+            .slider-container {{
+                width: 60%;
+                margin: 0 auto 30px auto;
+            }}
+            input[type=range] {{
+                width: 100%;
+            }}
+            .box {{
+                margin: 20px auto;
+                padding: 15px;
+                border: 1px solid #444;
+                border-radius: 8px;
+                width: 70%;
+                text-align: left;
+                background: #f9f9f9;
+                white-space: pre-wrap;
+                font-family: monospace;
+            }}
+        </style>
+        <script>
+            function send(body) {{
+                var x = new XMLHttpRequest();
+                x.open("POST", "/", true);
+                x.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+                x.send(body);
+            }}
 
-        function setM1(v) {{
-            document.getElementById("m1_val").innerHTML = v + " deg";
-            send("m1=" + encodeURIComponent(v));
-        }}
+            function setM1(v) {{
+                document.getElementById("m1_val").innerHTML = v + " deg";
+                send("m1=" + encodeURIComponent(v));
+            }}
 
-        function setM2(v) {{
-            document.getElementById("m2_val").innerHTML = v + " deg";
-            send("m2=" + encodeURIComponent(v));
-        }}
+            function setM2(v) {{
+                document.getElementById("m2_val").innerHTML = v + " deg";
+                send("m2=" + encodeURIComponent(v));
+            }}
 
-        function laserTest() {{
-            send("laser_test=1");
-        }}
+            function laserTest() {{
+                send("laser_test=1");
+            }}
 
-        function setZero() {{
-            send("set_zero=1");
-        }}
+            function setZero() {{
+                send("set_zero=1");
+            }}
 
-        function startAuto() {{
-            send("auto=1");
-        }}
-    </script>
-</head>
-<body>
-    <h2>Stepper Motor + Laser Control</h2>
-    <h3>Logical angles are relative to calibrated (0,0) position</h3>
+            function startAuto() {{
+                send("auto=1");
+            }}
+        </script>
+    </head>
+    <body>
+        <h2>Stepper Motor + Laser Control</h2>
+        <h3>Logical angles are relative to calibrated (0,0) position</h3>
 
-    <div class="slider-container">
-        <h3>Motor 1 (Azimuth)</h3>
-        <input type="range" min="-180" max="180" value="{log_m1_angle:.1f}"
-               oninput="setM1(this.value)">
-        <div>Angle: <span id="m1_val">{log_m1_angle:.1f} deg</span></div>
-    </div>
+        <div class="slider-container">
+            <h3>Motor 1 (Azimuth)</h3>
+            <input type="range" min="-180" max="180" value="{log_m1_angle:.1f}"
+                   oninput="setM1(this.value)">
+            <div>Angle: <span id="m1_val">{log_m1_angle:.1f} deg</span></div>
+        </div>
 
-    <div class="slider-container">
-        <h3>Motor 2 (Altitude)</h3>
-        <input type="range" min="-180" max="180" value="{log_m2_angle:.1f}"
-               oninput="setM2(this.value)">
-        <div>Angle: <span id="m2_val">{log_m2_angle:.1f} deg</span></div>
-    </div>
+        <div class="slider-container">
+            <h3>Motor 2 (Altitude)</h3>
+            <input type="range" min="-180" max="180" value="{log_m2_angle:.1f}"
+                   oninput="setM2(this.value)">
+            <div>Angle: <span id="m2_val">{log_m2_angle:.1f} deg</span></div>
+        </div>
 
-    <button onclick="laserTest()">Test Laser (3s)</button>
-    <button onclick="setZero()">Set as (0,0)</button>
-    <button onclick="startAuto()">Start Auto Sequence</button>
+        <button onclick="laserTest()">Test Laser (3s)</button>
+        <button onclick="setZero()">Set as (0,0)</button>
+        <button onclick="startAuto()">Start Auto Sequence</button>
 
-    <div class="box">
+        <div class="box">
 JSON Placement Data (Team {TEAM_ID})
 ------------------------------------
 {last_json_info}
-    </div>
+        </div>
 
-    <div class="box">
+        <div class="box">
 Auto Sequence Status
 --------------------
 {auto_status}
-    </div>
-</body>
-</html>
-"""
-    return html.encode("utf-8")
+        </div>
+    </body>
+    </html>
+    """
+    return html.encode('utf-8')
 
-
-# ----------------------- WEB SERVER ------------------------------------------
 
 def serve_web(m1, m2):
     global calib_m1, calib_m2, auto_running
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("", 8080))
+    s.bind(('', 8080))
     s.listen(3)
     print("Web server running on port 8080...")
 
@@ -410,7 +380,7 @@ def serve_web(m1, m2):
         while True:
             conn, addr = s.accept()
             try:
-                msg = conn.recv(4096).decode("utf-8", errors="ignore")
+                msg = conn.recv(4096).decode('utf-8', errors='ignore')
                 if not msg:
                     conn.close()
                     continue
@@ -418,7 +388,7 @@ def serve_web(m1, m2):
                 if msg.startswith("POST"):
                     data = parsePOSTdata(msg)
 
-                    # slider angle for Motor 1 (logical)
+                    # Slider angle for Motor 1 (logical)
                     if "m1" in data and data["m1"].strip() != "":
                         try:
                             log_target_m1 = float(data["m1"])
@@ -427,7 +397,7 @@ def serve_web(m1, m2):
                         except ValueError:
                             pass
 
-                    # slider angle for Motor 2 (logical)
+                    # Slider angle for Motor 2 (logical)
                     if "m2" in data and data["m2"].strip() != "":
                         try:
                             log_target_m2 = float(data["m2"])
@@ -436,32 +406,29 @@ def serve_web(m1, m2):
                         except ValueError:
                             pass
 
-                    # laser test
+                    # Laser test
                     if "laser_test" in data:
                         threading.Thread(target=test_laser, daemon=True).start()
 
-                    # calibration: current physical angles become logical (0,0)
+                    # Calibration: current physical angles become logical (0,0)
                     if "set_zero" in data:
                         calib_m1 = m1.angle
                         calib_m2 = m2.angle
                         print(f"[CALIBRATION] Set current position as (0,0): "
                               f"calib_m1={calib_m1:.2f}, calib_m2={calib_m2:.2f}")
 
-                    # start auto sequence (if not already running)
+                    # Start auto sequence
                     if "auto" in data and not auto_running:
                         print("[AUTO] Starting auto sequence...")
-                        threading.Thread(target=auto_sequence,
-                                         args=(m1, m2),
-                                         daemon=True).start()
+                        threading.Thread(target=auto_sequence, args=(m1, m2), daemon=True).start()
 
-                # compute logical angles for display (relative to calibration)
+                # Compute logical angles for display
                 log_m1 = logical_from_physical(m1.angle, calib_m1)
                 log_m2 = logical_from_physical(m2.angle, calib_m2)
 
-                # respond with current logical angles + JSON + status
-                body = web_page(log_m1, log_m2)
+                response_body = web_page(log_m1, log_m2)
                 header = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
-                conn.sendall(header + body)
+                conn.sendall(header + response_body)
 
             finally:
                 conn.close()
@@ -469,15 +436,14 @@ def serve_web(m1, m2):
         s.close()
 
 
-# ----------------------- MAIN -------------------------------------------------
-
 def main():
     global calib_m1, calib_m2
 
-    sh = Shifter(23, 24, 25)
+    # One shared shifter for both motors
+    s = Shifter(23, 24, 25)
 
-    m1 = Stepper(sh, 0)   # Motor 1 (azimuth)
-    m2 = Stepper(sh, 1)   # Motor 2 (altitude)
+    m1 = Stepper(s, 0)   # Motor 1 (azimuth)
+    m2 = Stepper(s, 1)   # Motor 2 (altitude)
 
     m1.zero()
     m2.zero()
@@ -486,10 +452,10 @@ def main():
     calib_m1 = m1.angle
     calib_m2 = m2.angle
 
-    # auto-load JSON placement data for team 17 on startup
-    fetch_positions()
+    # Auto-load JSON placement data on startup
+    load_positions_and_update_display()
 
-    # start web server thread
+    # Start web server thread
     t = threading.Thread(target=serve_web, args=(m1, m2), daemon=True)
     t.start()
 
@@ -505,7 +471,7 @@ def main():
         GPIO.cleanup()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         main()
     except Exception:
