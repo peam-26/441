@@ -1,0 +1,491 @@
+################################################################################
+# WEB + STEPPER MOTORS + LASER CONTROL
+#  - Auto JSON load for team 17 (placement)
+#  - Manual calibration via "Set as (0,0)" (center pole)
+#  - Auto sequence: aim at each other turret & fire for 3s
+#  NOTE: Motor 1 (index 0) = ALTITUDE (laser tilt)
+#        Motor 2 (index 1) = AZIMUTH (horizontal rotation)
+################################################################################
+
+import time
+import socket
+import threading
+import requests
+import json
+import math
+from shifter import Shifter     # make sure shifter.py defines class Shifter
+import RPi.GPIO as GPIO
+
+print("Script starting...")
+
+GPIO.setmode(GPIO.BCM)
+LASER_PIN = 17
+GPIO.setup(LASER_PIN, GPIO.OUT)
+GPIO.output(LASER_PIN, GPIO.LOW)
+
+# ---------- JSON CONFIG ----------
+JSON_URL = "http://192.168.1.254:8000/positions.json"
+TEAM_ID = "17"            # our team number for placement
+last_json_info = "No JSON loaded yet."
+
+# cache of the full JSON data
+positions_data = None
+
+# auto-sequence status
+auto_status = "Idle"
+auto_running = False
+
+motor_patterns = [0, 0]
+
+# calibration offsets: physical angle that corresponds to logical 0°
+# calib_m1 -> altitude motor (index 0)
+# calib_m2 -> azimuth motor (index 1)
+calib_m1 = 0.0
+calib_m2 = 0.0
+
+FIRE_TIME = 3.0  # laser on-time per target (seconds)
+
+
+class Stepper:
+    seq = [0b0001, 0b0011, 0b0010, 0b0110,
+           0b0100, 0b1100, 0b1000, 0b1001]
+
+    delay = 3000                      # microseconds between steps
+    steps_per_degree = 2048 / 360.0   # 28BYJ-48 typical
+
+    def __init__(self, shifter, index):
+        self.s = shifter
+        self.index = index    # 0 or 1
+        self.angle = 0.0      # current *physical* angle in degrees, kept in [-180, 180]
+        self.step_state = 0   # index into seq[]
+
+    def _normalize_angle(self, a):
+        while a > 180:
+            a -= 360
+        while a < -180:
+            a += 360
+        return a
+
+    def _step(self, direction):
+        global motor_patterns
+
+        self.step_state = (self.step_state + direction) % 8
+
+        motor_patterns[self.index] = Stepper.seq[self.step_state]  # 0–15
+        final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
+
+        self.s.shiftByte(final)
+
+        # Update physical angle
+        self.angle += direction / Stepper.steps_per_degree
+        self.angle = self._normalize_angle(self.angle)
+
+        time.sleep(Stepper.delay / 1e6)
+
+    def rotate(self, delta):
+        if delta == 0:
+            return
+        direction = 1 if delta > 0 else -1
+        steps = int(abs(delta) * Stepper.steps_per_degree)
+        for _ in range(steps):
+            self._step(direction)
+
+    def goAngle(self, target):
+        # target is a PHYSICAL angle
+        target = max(-180.0, min(180.0, float(target)))
+        current = self.angle
+        delta = target - current
+        if delta > 180:
+            delta -= 360
+        elif delta < -180:
+            delta += 360
+        self.rotate(delta)
+
+    def zero(self):
+        self.angle = 0.0
+
+
+def laser_on():
+    GPIO.output(LASER_PIN, GPIO.HIGH)
+
+def laser_off():
+    GPIO.output(LASER_PIN, GPIO.LOW)
+
+def test_laser():
+    laser_on()
+    time.sleep(FIRE_TIME)
+    laser_off()
+
+
+def parsePOSTdata(data):
+    data_dict = {}
+    idx = data.find('\r\n\r\n')
+    if idx == -1:
+        return data_dict
+    post = data[idx + 4:]
+    pairs = post.split('&')
+    for p in pairs:
+        if '=' in p:
+            key, val = p.split('=', 1)
+            data_dict[key] = val
+    return data_dict
+
+
+def normalize_angle(a):
+    while a > 180:
+        a -= 360
+    while a < -180:
+        a += 360
+    return a
+
+def normalize_rad(x):
+    while x > math.pi:
+        x -= 2 * math.pi
+    while x <= -math.pi:
+        x += 2 * math.pi
+    return x
+
+def logical_from_physical(physical, calib):
+    # logical = physical - calib
+    return normalize_angle(physical - calib)
+
+def physical_from_logical(logical, calib):
+    # physical target = calib + logical
+    return normalize_angle(calib + logical)
+
+
+# ---------- JSON LOADING (AUTO ON START) ----------
+def load_positions_and_update_display():
+    """
+    Fetch JSON and:
+      - cache full positions_data
+      - update last_json_info with our placement (r, theta) from JSON
+    """
+    global last_json_info, positions_data
+    try:
+        print(f"Fetching JSON from {JSON_URL} ...")
+        resp = requests.get(JSON_URL, timeout=40)
+        resp.raise_for_status()
+        data = resp.json()
+        positions_data = data
+
+        turret = data["turrets"][TEAM_ID]
+        r = float(turret["r"])
+        theta = float(turret["theta"])  # radians
+
+        last_json_info = (
+            f"Team {TEAM_ID} turret placement (arena polar):\n"
+            f"  r     = {r:.2f} cm\n"
+            f"  theta = {theta:.6f} rad"
+        )
+
+        print("[OK] JSON loaded:")
+        print(last_json_info)
+
+    except Exception as e:
+        positions_data = None
+        last_json_info = f"Error loading JSON: {e}"
+        print("[ERROR] JSON load failed:", e)
+
+
+def compute_logical_azimuth_to_target(theta_self, theta_target):
+    """
+    Given our arena angle theta_self (rad) and target's arena angle theta_target (rad),
+    compute the LOGICAL azimuth angle (deg) we must rotate to aim from our turret
+    to the target, assuming logical 0° is pointing at the arena center.
+    """
+    xs, ys = math.cos(theta_self), math.sin(theta_self)
+    xt, yt = math.cos(theta_target), math.sin(theta_target)
+
+    vx, vy = xt - xs, yt - ys     # vector from us to target
+    phi = math.atan2(vy, vx)      # global direction to target
+
+    # center direction from us: theta_self + pi
+    phi_center = theta_self + math.pi
+
+    d = normalize_rad(phi - phi_center)
+    return math.degrees(d)
+
+
+# ---------- AUTO SEQUENCE ----------
+def auto_sequence(m_alt, m_az):
+    """
+    From calibrated (0,0) position, aim at each other team's turret and
+    fire laser for FIRE_TIME seconds. Altitude assumed already correct.
+    NOTE: m_alt = altitude motor (index 0), m_az = azimuth motor (index 1)
+    """
+    global auto_status, auto_running, positions_data, calib_m1, calib_m2
+
+    if positions_data is None:
+        load_positions_and_update_display()
+    if positions_data is None:
+        auto_status = "Auto sequence aborted: no JSON data."
+        return
+
+    try:
+        auto_running = True
+        turrets = positions_data["turrets"]
+
+        if TEAM_ID not in turrets:
+            auto_status = f"Auto sequence aborted: TEAM_ID {TEAM_ID} missing."
+            return
+
+        theta_self = float(turrets[TEAM_ID]["theta"])
+
+        # altitude motor: keep logical 0 (whatever you calibrated for the center)
+        logical_alt = 0.0
+        phys_alt = physical_from_logical(logical_alt, calib_m1)  # calib_m1 = altitude calib
+        m_alt.goAngle(phys_alt)
+
+        # visit all other turrets in order
+        for team_str, info in sorted(turrets.items(), key=lambda kv: int(kv[0])):
+            if team_str == TEAM_ID:
+                continue
+
+            theta_target = float(info["theta"])
+            logical_az = compute_logical_azimuth_to_target(theta_self, theta_target)
+            auto_status = f"Aiming at Team {team_str} (azimuth {logical_az:.1f}°)"
+            print(auto_status)
+
+            # azimuth uses calib_m2
+            phys_az = physical_from_logical(logical_az, calib_m2)
+            m_az.goAngle(phys_az)
+
+            # fire laser for FIRE_TIME seconds
+            laser_on()
+            time.sleep(FIRE_TIME)
+            laser_off()
+
+            time.sleep(0.5)
+
+        auto_status = "Auto sequence finished."
+
+    finally:
+        laser_off()
+        auto_running = False
+
+
+def web_page(log_m1_angle, log_m2_angle):
+    """
+    HTML UI:
+      - Motor 1 slider = ALTITUDE (laser tilt) [logical]
+      - Motor 2 slider = AZIMUTH (horizontal) [logical]
+      - Test laser, Set (0,0), Start Auto Sequence
+      - JSON info and auto sequence status
+    """
+    global last_json_info, auto_status
+
+    html = f"""
+    <html>
+    <head>
+        <title>Turret Control</title>
+        <style>
+            body {{
+                font-family: Arial;
+                text-align: center;
+                margin-top: 40px;
+            }}
+            .slider-container {{
+                width: 60%;
+                margin: 0 auto 30px auto;
+            }}
+            input[type=range] {{
+                width: 100%;
+            }}
+            .box {{
+                margin: 20px auto;
+                padding: 15px;
+                border: 1px solid #444;
+                border-radius: 8px;
+                width: 70%;
+                text-align: left;
+                background: #f9f9f9;
+                white-space: pre-wrap;
+                font-family: monospace;
+            }}
+        </style>
+        <script>
+            function send(body) {{
+                var x = new XMLHttpRequest();
+                x.open("POST", "/", true);
+                x.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+                x.send(body);
+            }}
+
+            function setM1(v) {{
+                document.getElementById("m1_val").innerHTML = v + " deg";
+                send("m1=" + encodeURIComponent(v));
+            }}
+
+            function setM2(v) {{
+                document.getElementById("m2_val").innerHTML = v + " deg";
+                send("m2=" + encodeURIComponent(v));
+            }}
+
+            function laserTest() {{
+                send("laser_test=1");
+            }}
+
+            function setZero() {{
+                send("set_zero=1");
+            }}
+
+            function startAuto() {{
+                send("auto=1");
+            }}
+        </script>
+    </head>
+    <body>
+        <h2>Stepper Motor + Laser Control</h2>
+        <h3>Logical angles are relative to calibrated (0,0) position</h3>
+
+        <div class="slider-container">
+            <h3>Motor 1 (Altitude / Laser Tilt)</h3>
+            <input type="range" min="-180" max="180" value="{log_m1_angle:.1f}"
+                   oninput="setM1(this.value)">
+            <div>Angle: <span id="m1_val">{log_m1_angle:.1f} deg</span></div>
+        </div>
+
+        <div class="slider-container">
+            <h3>Motor 2 (Azimuth / Horizontal)</h3>
+            <input type="range" min="-180" max="180" value="{log_m2_angle:.1f}"
+                   oninput="setM2(this.value)">
+            <div>Angle: <span id="m2_val">{log_m2_angle:.1f} deg</span></div>
+        </div>
+
+        <button onclick="laserTest()">Test Laser (3s)</button>
+        <button onclick="setZero()">Set as (0,0)</button>
+        <button onclick="startAuto()">Start Auto Sequence</button>
+
+        <div class="box">
+JSON Placement Data (Team {TEAM_ID})
+------------------------------------
+{last_json_info}
+        </div>
+
+        <div class="box">
+Auto Sequence Status
+--------------------
+{auto_status}
+        </div>
+    </body>
+    </html>
+    """
+    return html.encode('utf-8')
+
+
+def serve_web(m1_alt, m2_az):
+    global calib_m1, calib_m2, auto_running
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('', 8080))
+    s.listen(3)
+    print("Web server running on port 8080...")
+
+    try:
+        while True:
+            conn, addr = s.accept()
+            try:
+                msg = conn.recv(4096).decode('utf-8', errors='ignore')
+                if not msg:
+                    conn.close()
+                    continue
+
+                if msg.startswith("POST"):
+                    data = parsePOSTdata(msg)
+
+                    # Slider angle for Motor 1 (ALTITUDE, logical)
+                    if "m1" in data and data["m1"].strip() != "":
+                        try:
+                            log_target_m1 = float(data["m1"])
+                            phys_target_m1 = physical_from_logical(log_target_m1, calib_m1)
+                            m1_alt.goAngle(phys_target_m1)
+                        except ValueError:
+                            pass
+
+                    # Slider angle for Motor 2 (AZIMUTH, logical)
+                    if "m2" in data and data["m2"].strip() != "":
+                        try:
+                            log_target_m2 = float(data["m2"])
+                            phys_target_m2 = physical_from_logical(log_target_m2, calib_m2)
+                            m2_az.goAngle(phys_target_m2)
+                        except ValueError:
+                            pass
+
+                    # Laser test
+                    if "laser_test" in data:
+                        threading.Thread(target=test_laser, daemon=True).start()
+
+                    # Calibration: current physical angles become logical (0,0)
+                    if "set_zero" in data:
+                        calib_m1 = m1_alt.angle
+                        calib_m2 = m2_az.angle
+                        print(f"[CALIBRATION] Set current position as (0,0): "
+                              f"calib_m1={calib_m1:.2f}, calib_m2={calib_m2:.2f}")
+
+                    # Start auto sequence
+                    if "auto" in data and not auto_running:
+                        print("[AUTO] Starting auto sequence...")
+                        threading.Thread(target=auto_sequence,
+                                         args=(m1_alt, m2_az),
+                                         daemon=True).start()
+
+                # Compute logical angles for display
+                log_m1 = logical_from_physical(m1_alt.angle, calib_m1)
+                log_m2 = logical_from_physical(m2_az.angle, calib_m2)
+
+                response_body = web_page(log_m1, log_m2)
+                header = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+                conn.sendall(header + response_body)
+
+            finally:
+                conn.close()
+    finally:
+        s.close()
+
+
+def main():
+    global calib_m1, calib_m2
+
+    # One shared shifter for both motors
+    s = Shifter(23, 24, 25)
+
+    # Motor 1 = altitude (laser tilt), Motor 2 = azimuth (horizontal)
+    m1_alt = Stepper(s, 0)
+    m2_az  = Stepper(s, 1)
+
+    m1_alt.zero()
+    m2_az.zero()
+
+    # initial calibration at this zero position
+    calib_m1 = m1_alt.angle
+    calib_m2 = m2_az.angle
+
+    # Auto-load JSON placement data on startup
+    load_positions_and_update_display()
+
+    # Start web server thread
+    t = threading.Thread(target=serve_web, args=(m1_alt, m2_az), daemon=True)
+    t.start()
+
+    print("Motors initialized. Web interface ready.")
+    print("Open a browser to: http://<raspberry-pi-ip>:8080")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Exiting.")
+    finally:
+        GPIO.cleanup()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        import traceback
+        print("FATAL ERROR:")
+        traceback.print_exc()
+        GPIO.cleanup()
