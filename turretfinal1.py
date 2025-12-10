@@ -5,35 +5,44 @@
 import time
 import socket
 import threading
-import requests
-from shifter import Shifter     # make sure shifter.py defines class Shifter
+import json
+import urllib.request
+
+from shifter import Shifter   # make sure shifter.py defines class Shifter
 import RPi.GPIO as GPIO
 
 print("Script starting...")
+
+# ----------------------- GPIO / LASER SETUP -----------------------------------
 
 GPIO.setmode(GPIO.BCM)
 LASER_PIN = 17
 GPIO.setup(LASER_PIN, GPIO.OUT)
 GPIO.output(LASER_PIN, GPIO.LOW)
 
-# ---------- JSON CONFIG ----------
+# ----------------------- JSON CONFIG -----------------------------------------
+
 JSON_URL = "http://192.168.1.254:8000/positions.json"
-TEAM_ID = "17"            # we are team 17 for placement coordinates
+TEAM_ID = "17"          # team 17 placement coordinates
 last_json_info = "No JSON loaded yet."
 
+# motor coil patterns (4 bits per motor)
 motor_patterns = [0, 0]
 
-# Calibration offsets: physical angle that corresponds to logical 0°
+# calibration offsets: physical angle that corresponds to logical 0°
 calib_m1 = 0.0
 calib_m2 = 0.0
 
 
+# ----------------------- STEPPER CLASS ---------------------------------------
+
 class Stepper:
+    # half-step sequence for 28BYJ-48
     seq = [0b0001, 0b0011, 0b0010, 0b0110,
            0b0100, 0b1100, 0b1000, 0b1001]
 
-    delay = 3000                      # microseconds between steps
-    steps_per_degree = 2048 / 360.0   # 28BYJ-48 typical
+    delay = 3000                    # microseconds between steps
+    steps_per_degree = 2048 / 360.0 # 28BYJ-48 gear ratio 1:64
 
     def __init__(self, shifter, index):
         self.s = shifter
@@ -53,12 +62,15 @@ class Stepper:
 
         self.step_state = (self.step_state + direction) % 8
 
-        motor_patterns[self.index] = Stepper.seq[self.step_state]  # 0–15
-        final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
+        # store this motor's 4-bit pattern
+        motor_patterns[self.index] = Stepper.seq[self.step_state]
 
+        # pack both motors into one byte:
+        # motor 0 → low nibble, motor 1 → high nibble
+        final = (motor_patterns[0] & 0x0F) | ((motor_patterns[1] & 0x0F) << 4)
         self.s.shiftByte(final)
 
-        # Update physical angle
+        # update physical angle
         self.angle += direction / Stepper.steps_per_degree
         self.angle = self._normalize_angle(self.angle)
 
@@ -87,27 +99,49 @@ class Stepper:
         self.angle = 0.0
 
 
+# ----------------------- LASER CONTROL ---------------------------------------
+
 def test_laser():
     GPIO.output(LASER_PIN, GPIO.HIGH)
     time.sleep(3)
     GPIO.output(LASER_PIN, GPIO.LOW)
 
 
+# ----------------------- SIMPLE HELPERS --------------------------------------
+
 def parsePOSTdata(data):
-    data_dict = {}
-    idx = data.find('\r\n\r\n')
+    d = {}
+    idx = data.find("\r\n\r\n")
     if idx == -1:
-        return data_dict
+        return d
     post = data[idx + 4:]
-    pairs = post.split('&')
-    for p in pairs:
-        if '=' in p:
-            key, val = p.split('=', 1)
-            data_dict[key] = val
-    return data_dict
+    for p in post.split("&"):
+        if "=" in p:
+            k, v = p.split("=", 1)
+            d[k] = v
+    return d
 
 
-# ---------- JSON LOADING (DISPLAY ONLY, AUTO ON START) ----------
+def normalize_angle(a):
+    while a > 180:
+        a -= 360
+    while a < -180:
+        a += 360
+    return a
+
+
+def logical_from_physical(physical, calib):
+    # logical = physical - calib
+    return normalize_angle(physical - calib)
+
+
+def physical_from_logical(logical, calib):
+    # physical target = calib + logical
+    return normalize_angle(calib + logical)
+
+
+# ----------------------- JSON LOADING (AUTO ON START) ------------------------
+
 def load_json_position():
     """
     Fetch JSON and update global last_json_info with r and theta for TEAM_ID.
@@ -116,9 +150,9 @@ def load_json_position():
     global last_json_info
     try:
         print(f"Fetching JSON from {JSON_URL} ...")
-        resp = requests.get(JSON_URL, timeout=40)   # longer timeout
-        resp.raise_for_status()
-        data = resp.json()
+        with urllib.request.urlopen(JSON_URL, timeout=40) as resp:
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
 
         turret = data["turrets"][TEAM_ID]
         r = float(turret["r"])
@@ -138,36 +172,12 @@ def load_json_position():
         print("[ERROR] JSON load failed:", e)
 
 
-# ---------- CALIBRATION HELPERS ----------
-
-def normalize_angle(a):
-    while a > 180:
-        a -= 360
-    while a < -180:
-        a += 360
-    return a
-
-
-def logical_from_physical(physical, calib):
-    """
-    Convert a physical motor angle (deg) and calibration (deg)
-    into a logical angle (deg) relative to calibration.
-    """
-    return normalize_angle(physical - calib)
-
-
-def physical_from_logical(logical, calib):
-    """
-    Convert a logical target angle (deg, relative to calibration)
-    into a physical target angle (deg) for the motor.
-    """
-    return normalize_angle(calib + logical)
-
+# ----------------------- WEB PAGE --------------------------------------------
 
 def web_page(log_m1_angle, log_m2_angle):
     """
-    HTML UI with JS sliders for live control, laser test,
-    JSON info box, and (0,0) calibration button.
+    HTML UI with sliders (logical angles), laser test,
+    JSON info (auto-loaded on start), and a Set (0,0) button.
     """
     global last_json_info
 
@@ -256,15 +266,17 @@ JSON Placement Data (auto-loaded on start)
 </body>
 </html>
 """
-    return html.encode('utf-8')
+    return html.encode("utf-8")
 
+
+# ----------------------- WEB SERVER ------------------------------------------
 
 def serve_web(m1, m2):
     global calib_m1, calib_m2
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('', 8080))
+    s.bind(("", 8080))
     s.listen(3)
     print("Web server running on port 8080...")
 
@@ -272,7 +284,7 @@ def serve_web(m1, m2):
         while True:
             conn, addr = s.accept()
             try:
-                msg = conn.recv(4096).decode('utf-8', errors='ignore')
+                msg = conn.recv(4096).decode("utf-8", errors="ignore")
                 if not msg:
                     conn.close()
                     continue
@@ -280,7 +292,7 @@ def serve_web(m1, m2):
                 if msg.startswith("POST"):
                     data = parsePOSTdata(msg)
 
-                    # Slider angle for Motor 1 (logical)
+                    # slider angle for Motor 1 (logical)
                     if "m1" in data and data["m1"].strip() != "":
                         try:
                             log_target_m1 = float(data["m1"])
@@ -289,7 +301,7 @@ def serve_web(m1, m2):
                         except ValueError:
                             pass
 
-                    # Slider angle for Motor 2 (logical)
+                    # slider angle for Motor 2 (logical)
                     if "m2" in data and data["m2"].strip() != "":
                         try:
                             log_target_m2 = float(data["m2"])
@@ -298,25 +310,25 @@ def serve_web(m1, m2):
                         except ValueError:
                             pass
 
-                    # Laser test
+                    # laser test
                     if "laser_test" in data:
                         threading.Thread(target=test_laser, daemon=True).start()
 
-                    # Calibration: current physical angles become logical (0,0)
+                    # calibration: current physical angles become logical (0,0)
                     if "set_zero" in data:
                         calib_m1 = m1.angle
                         calib_m2 = m2.angle
                         print(f"[CALIBRATION] Set current position as (0,0): "
                               f"calib_m1={calib_m1:.2f}, calib_m2={calib_m2:.2f}")
 
-                # Compute logical angles for display (relative to calibration)
+                # compute logical angles for display (relative to calibration)
                 log_m1 = logical_from_physical(m1.angle, calib_m1)
                 log_m2 = logical_from_physical(m2.angle, calib_m2)
 
-                # Always respond with current logical angles
-                response_body = web_page(log_m1, log_m2)
+                # respond with current logical angles + JSON info
+                body = web_page(log_m1, log_m2)
                 header = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
-                conn.sendall(header + response_body)
+                conn.sendall(header + body)
 
             finally:
                 conn.close()
@@ -324,26 +336,27 @@ def serve_web(m1, m2):
         s.close()
 
 
+# ----------------------- MAIN -------------------------------------------------
+
 def main():
     global calib_m1, calib_m2
 
-    # One shared shifter for both motors
-    s = Shifter(23, 24, 25)
+    sh = Shifter(23, 24, 25)
 
-    m1 = Stepper(s, 0)   # Motor 1 (azimuth)
-    m2 = Stepper(s, 1)   # Motor 2 (altitude)
+    m1 = Stepper(sh, 0)   # Motor 1 (azimuth)
+    m2 = Stepper(sh, 1)   # Motor 2 (altitude)
 
     m1.zero()
     m2.zero()
 
-    # Initially, calibration is at this zero position
+    # initial calibration at this zero position
     calib_m1 = m1.angle
     calib_m2 = m2.angle
 
-    # Auto-load JSON placement data for team 17 on startup
+    # auto-load JSON placement data for team 17 on startup
     load_json_position()
 
-    # Start web server thread
+    # start web server thread
     t = threading.Thread(target=serve_web, args=(m1, m2), daemon=True)
     t.start()
 
@@ -359,7 +372,7 @@ def main():
         GPIO.cleanup()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         main()
     except Exception:
