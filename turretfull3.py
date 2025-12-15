@@ -51,7 +51,7 @@ class Stepper:
            0b0100, 0b1100, 0b1000, 0b1001]
 
     delay = 3000                      # microseconds between steps
-    steps_per_degree = 2048 / 360.0   # 28BYJ-48 typical
+    steps_per_degree = 4096 / 360.0   # 28BYJ-48 typical
 
     def __init__(self, shifter, index):
         self.s = shifter
