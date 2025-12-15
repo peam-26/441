@@ -199,10 +199,6 @@ def load_positions_and_update_display():
 
 
 def compute_logical_azimuth_to_target(theta_self, r_self, theta_target, r_target):
-    """
-    Compute logical azimuth angle (deg) needed to point from our turret
-    to a target (turret or globe), assuming logical 0° = pointing at arena center.
-    """
     xs, ys = r_self * math.cos(theta_self), r_self * math.sin(theta_self)
     xt, yt = r_target * math.cos(theta_target), r_target * math.sin(theta_target)
 
@@ -210,8 +206,10 @@ def compute_logical_azimuth_to_target(theta_self, r_self, theta_target, r_target
     phi = math.atan2(vy, vx)      # global direction to target
 
     phi_center = theta_self + math.pi  # direction from us to center
-    d = normalize_rad(phi - phi_center)
+    # Flip the sign so "positive" logical angle matches how the motor turns
+    d = normalize_rad(phi_center - phi)
     return math.degrees(d)
+
 
 def horizontal_distance(theta_self, r_self, theta_target, r_target):
     xs, ys = r_self * math.cos(theta_self), r_self * math.sin(theta_self)
